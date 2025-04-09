@@ -1,0 +1,16 @@
+name: Kali Build
+on: [push]
+
+jobs:
+  build:
+    container: docker.io/kalilinux/kali-rolling
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          apt update
+          apt install -y libglib2.0-bin meson gettext git
+          
+      - name: Compile schemas
+        run: glib-compile-schemas schemas/
