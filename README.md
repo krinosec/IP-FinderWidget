@@ -90,4 +90,24 @@ Ensure GNOME Shell is your active desktop environment. Tested on Kali Linux 2024
 2. **Create `.gschema.xml`**: For settings (let me know if you need help)
 3. **Add System Tray Code**: The `extension.js` needs panel menu implementation
 
-Want me to help with any specific part of the JavaScript GNOME extension code?
+## 🧑💻 For Developers
+
+### Prerequisites
+- GLib 2.0+ (for schema compilation)
+- Kali/Debian/Ubuntu/Fedora (GNOME 45+ recommended)
+
+### Local Setup
+```bash
+# Clone repo
+git clone https://github.com/krinosec/IP-FinderWidget.git
+cd IP-FinderWidget
+
+# Install build tools (one-time setup)
+sudo apt install libglib2.0-bin meson gettext  # Debian/Ubuntu/Kali
+sudo dnf install glib2 meson gettext           # Fedora
+
+# Compile schemas & build
+glib-compile-schemas schemas/
+meson setup build
+ninja -C build
+```
