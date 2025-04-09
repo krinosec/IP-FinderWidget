@@ -1,15 +1,13 @@
-Here's an improved README.md for your IP-FinderWidget repository. You can preview it [here](https://github.com/krinosec/IP-FinderWidget) or copy-paste this directly:
-
 ```markdown
 # 🌐 IP Finder Widget
 
-A lightweight Python GUI widget to fetch geolocation data for any IP address using the [ip-api.com](https://ip-api.com) API.
+A lightweight GUI widget to fetch geolocation data with a snapshot and display users current IP address info with option to add custom API.
 
 ![Demo Screenshot](https://via.placeholder.com/600x400.png?text=Screenshot+Placeholder+%28Add+Actual+Image+Later%29)
 
 ## Features
-- Retrieve ISP, country, city, and geolocation data for any IP
-- Simple and clean Tkinter GUI interface
+- Retrieve ISP, country, city, and geolocation data image for any IP
+- Simple and clean GUI interface
 - Error handling for API connectivity issues
 - Fast results (typically <1 second)
 
@@ -32,14 +30,6 @@ Run the widget:
 ```bash
 python ip_finder.py
 ```
-
-1. Enter an IP address (e.g., `8.8.8.8`)
-2. Click **Find IP**
-3. View results including:
-   - Internet Service Provider (ISP)
-   - Country/City
-   - Latitude/Longitude
-   - Timezone
 
 *Note: Free API limited to 45 requests/minute.*
 
@@ -75,9 +65,9 @@ This project is licensed under the [GPL-3.0 License](LICENSE).
 
 ### To Complete This README:
 1. **Add a Screenshot**:
-   - Take a screenshot of your widget in action
+   - Take a screenshot of widget in action
    - Name it `screenshot.png`
-   - Upload it to your repo
+   - Upload it to repo
    - Replace the placeholder image URL with `./screenshot.png`
 
 2. **Optional Additions**:
