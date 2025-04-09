@@ -1,7 +1,8 @@
 ```markdown
 # 🌐 IP Finder Widget
 
-A lightweight GUI widget to fetch geolocation data with a snapshot and display users current IP address info with option to add custom API.
+A lightweight GUI widget to fetch geolocation data with a snapshot and display users
+current IP address info with option to add your own custom API.
 
 ![Demo Screenshot](https://via.placeholder.com/600x400.png?text=Screenshot+Placeholder+%28Add+Actual+Image+Later%29)
 
