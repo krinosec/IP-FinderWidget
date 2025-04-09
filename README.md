@@ -1,4 +1,3 @@
-Here’s a fully updated **README.md** tailored for your GitHub repository. Replace your existing one with this:
 
 ```markdown
 # 🌐 IP Finder GNOME Extension 
@@ -126,4 +125,3 @@ This README now supports:
 ✅ GNOME extension best practices  
 ✅ Kali Linux-specific instructions  
 
-Want me to tweak any specific section? 🔧
