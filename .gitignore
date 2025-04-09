@@ -1,0 +1,10 @@
+# Compiled schemas
+schemas/gschemas.compiled
+
+# Build directories
+build/
+dist/
+
+# Editor/IDE files
+.vscode/
+.idea/
