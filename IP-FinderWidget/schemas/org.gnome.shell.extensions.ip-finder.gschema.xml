@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+    <enum id="org.gnome.shell.extensions.ip-finder.position">
+        <value value="0" nick="left"/>
+        <value value="1" nick="center"/>
+        <value value="2" nick="right"/>
+    </enum>
+    <enum id="org.gnome.shell.extensions.ip-finder.panel-actors">
+        <value value="0" nick="Flag and IP Address"/>
+        <value value="1" nick="Flag"/>
+        <value value="2" nick="IP Address"/>
+    </enum>
+    <enum id="org.gnome.shell.extensions.ip-finder.vpn-widgets">
+        <value value="0" nick="ALL"/>
+        <value value="1" nick="ICON_ONLY"/>
+        <value value="2" nick="TEXT_ONLY"/>
+    </enum>
+    <enum id="org.gnome.shell.extensions.ip-finder.api-service">
+        <value value="0" nick="ipinfo"/>
+        <value value="1" nick="ip-api"/>
+    </enum>
+    <schema path="/org/gnome/shell/extensions/ip-finder/" id="org.gnome.shell.extensions.ip-finder">
+        <key type="s" name="map-tile-coords">
+            <default>''</default>
+            <summary>Coords for map tile image</summary>
+        </key>
+        <key name="api-service" enum="org.gnome.shell.extensions.ip-finder.api-service">
+            <default>'ipinfo'</default>
+            <summary>The API service to use to gather IP info</summary>
+        </key>
+        <key name="position-in-panel" enum="org.gnome.shell.extensions.ip-finder.position">
+            <default>'right'</default>
+            <summary>Position in Panel</summary>
+        </key>
+        <key name="actors-in-panel" enum="org.gnome.shell.extensions.ip-finder.panel-actors">
+            <default>'Flag and IP Address'</default>
+            <summary>Position in Panel</summary>
+        </key>
+        <key type="b" name="vpn-status">
+            <default>true</default>
+            <summary>Show VPN status widgets</summary>
+        </key>
+        <key name="vpn-widgets" enum="org.gnome.shell.extensions.ip-finder.vpn-widgets">
+            <default>'ALL'</default>
+            <summary>Which widgets to show for VPN status</summary>
+        </key>
+        <key type="b" name="vpn-status-only-when-on">
+            <default>false</default>
+            <summary>Show VPN status widgets only when VPN is on</summary>
+        </key>
+        <key type="b" name="vpn-icon-color">
+            <default>true</default>
+            <summary>Show VPN icon with color based on VPN status</summary>
+        </key>
+        <key type="b" name="vpn-ip-address-color">
+            <default>false</default>
+            <summary>Show IP address with color based on VPN status</summary>
+        </key>
+        <key type="as" name="current-connection-ids">
+            <default>[]</default>
+            <summary>Store the current connection ID</summary>
+        </key>
+        <key type="as" name="vpn-connections-whitelist">
+            <default>[]</default>
+            <summary>Whitelist for connections not automatically recognized as a VPN</summary>
+        </key>
+        <key type="i" name="tile-zoom">
+            <default>9</default>
+            <summary>Zoom level for map tile.</summary>
+            <range min="7" max="13"/>
+        </key>
+        <key type="as" name="vpn-connection-types">
+            <default>['vpn', 'wireguard', 'tun']</default>
+            <summary>Connection types to flag as a VPN connection</summary>
+        </key>
+    </schema>
+</schemalist>
