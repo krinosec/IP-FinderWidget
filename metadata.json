@@ -5,11 +5,14 @@
   "name": "IP Finder Widget",
   "settings-schema": "org.gnome.shell.extensions.ip-finder-widget",
   "shell-version": [
-    "45",  # Kali 2024.1+ uses GNOME 45
-    "44",  # Compatible with older Kali
-    "43"
+    "45",
+    "44",
+    "43",
+    "42",
+    "41",
+    "40"
   ],
   "url": "https://github.com/krinosec/IP-FinderWidget",
-  "uuid": "ip-finder-widget@krinosec.github.com",
+  "uuid": "IPFinderWidget@krinosec",
   "version": 1
 }
