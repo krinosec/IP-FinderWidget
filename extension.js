@@ -1,344 +1,757 @@
-'use strict';
+/* extension.js – Revised Enhanced Version */
+/* eslint-disable jsdoc/require-jsdoc */
 
-// Imports
-const { Gio, GLib, St, GObject, Soup, NM } = imports.gi;
-const Main = imports.ui.main;
-const PanelMenu = imports.ui.panelMenu;
-const PopupMenu = imports.ui.popupMenu;
-const Config = imports.misc.config;
-const ExtensionUtils = imports.misc.extensionUtils;
-const ModalDialog = imports.ui.modalDialog;
-const Gettext = imports.gettext;
-const Lang = imports.lang;
+import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
+import Mtk from 'gi://Mtk';
+import NM from 'gi://NM';
+import Soup from 'gi://Soup';
+import St from 'gi://St';
 
-// Fallback for Mainloop (for GNOME versions where it's not defined)
-var Mainloop = imports.mainloop ? imports.mainloop : (imports.main ? imports.main : null);
+import * as Config from 'resource:///org/gnome/shell/misc/config.js';
+import { loadInterfaceXML } from 'resource:///org/gnome/shell/misc/fileUtils.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-const Me = ExtensionUtils.getCurrentExtension();
-const _ = Gettext.domain(Me.metadata['gettext-domain']).gettext;
+import * as Utils from './utils.js';
+const { getFlagEmoji, ApiService } = Utils;
 
-// Constants
-const API_SERVICES = {
-  IP_API: 0,
-  IPINFO_IO: 1,
-  CUSTOM: 2
-};
+import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
+
+// Enable debug logging.
 const DEBUG_LOG = true;
-const SESSION = new Soup.Session();
-const DEFAULT_MAP = Me.path + '/icons/default_map.png';
-
-let settings;
-let ipFinderInstance = null;
-
 function debugLog(msg) {
-    if (DEBUG_LOG) console.log(`[IP Finder] ${msg}`);
+  if (!DEBUG_LOG) return;
+  // Using the built-in log for GNOME extensions.
+  log(`[IP-Finder] ${msg}`);
 }
 
-/* ***************************************
-   Modern Implementation for GNOME 45+
-   using GObject.registerClass and async/await
-***************************************** */
-const IPFinderWidget = GObject.registerClass(
-class IPFinderWidget extends PanelMenu.Button {
-    _init() {
-        super._init(0.0, 'IPFinderWidget');
-        this._buildUI();
-        this._setupNetworkMonitoring();
-        this._refreshData();
-        this._setupListeners();
-        this._setupAutoRefresh();
+// Load Portal Helper interface for connectivity checks.
+const PortalHelperIface = loadInterfaceXML('org.gnome.Shell.PortalHelper');
+const PortalHelperInfo = Gio.DBusInterfaceInfo.new_for_xml(PortalHelperIface);
+
+const PortalHelperResult = {
+  CANCELLED: 0,
+  COMPLETED: 1,
+  RECHECK: 2,
+};
+
+const VpnWidgets = {
+  ALL: 0,
+  ICON_ONLY: 1,
+  TEXT_ONLY: 2,
+};
+
+const PanelActors = {
+  FLAG_IP: 0,
+  FLAG: 1,
+  IP: 2,
+};
+
+// Constant for custom API (must match preference value)
+const CUSTOM_API = 2;
+
+var VpnInfoBox = GObject.registerClass(
+  class IPFinderVpnInfoBox extends St.BoxLayout {
+    _init(params) {
+      super._init({ ...params });
+      this._vpnTitleLabel = new St.Label({
+        style_class: 'ip-info-vpn-off',
+        text: `${_('VPN')}: `,
+        x_align: Clutter.ActorAlign.FILL,
+        y_align: Clutter.ActorAlign.START,
+      });
+      this.add_child(this._vpnTitleLabel);
+
+      this._vpnStatusLabel = new St.Label({
+        x_align: Clutter.ActorAlign.FILL,
+        y_align: Clutter.ActorAlign.START,
+        x_expand: true,
+        style_class: 'ip-info-vpn-off',
+      });
+      this.add_child(this._vpnStatusLabel);
+
+      this._vpnIcon = new St.Icon({
+        style_class: 'popup-menu-icon ip-info-vpn-off',
+      });
+      this.add_child(this._vpnIcon);
+    }
+    setVpnStatus(vpnStatus) {
+      this._vpnTitleLabel.set_style_class_name(vpnStatus.styleClass);
+      this._vpnStatusLabel.set_style_class_name(vpnStatus.styleClass);
+      this._vpnIcon.set_style_class_name(`popup-menu-icon ${vpnStatus.styleClass}`);
+      this._vpnStatusLabel.text = vpnStatus.vpnOn ? vpnStatus.vpnName : _('Off');
+      this._vpnIcon.gicon = Gio.icon_new_for_string(vpnStatus.iconPath);
+    }
+  }
+);
+
+var BaseButton = GObject.registerClass(
+  class IPFinderBaseButton extends St.Button {
+    _init(text, params) {
+      super._init({
+        style_class: 'icon-button',
+        reactive: true,
+        can_focus: true,
+        track_hover: true,
+        button_mask: St.ButtonMask.ONE | St.ButtonMask.TWO,
+        ...params,
+      });
+      this.connect('notify::hover', () => this._onHover());
+      this.connect('destroy', () => this._onDestroy());
+      this.tooltipLabel = new St.Label({
+        style_class: 'dash-label tooltip-label',
+        text: _(text)
+      });
+      this.tooltipLabel.hide();
+      global.stage.add_child(this.tooltipLabel);
+    }
+    _onHover() {
+      if (this.hover)
+        this.showLabel();
+      else
+        this.hideLabel();
+    }
+    showLabel() {
+      this.tooltipLabel.opacity = 0;
+      this.tooltipLabel.show();
+      const [stageX, stageY] = this.get_transformed_position();
+      const itemWidth = this.allocation.get_width();
+      const labelWidth = this.tooltipLabel.get_width();
+      const offset = 6;
+      const xOffset = Math.floor((itemWidth - labelWidth) / 2);
+      const monitorIndex = Main.layoutManager.findIndexForActor(this);
+      const workArea = Main.layoutManager.getWorkAreaForMonitor(monitorIndex);
+      let y;
+      const x = Math.clamp(stageX + xOffset, offset, workArea.x + workArea.width - labelWidth - offset);
+      const labelBelowIconRect = new Mtk.Rectangle({
+        x,
+        y: stageY + this.allocation.get_height() + offset,
+        width: labelWidth,
+        height: this.tooltipLabel.get_height()
+      });
+      if (workArea.contains_rect(labelBelowIconRect))
+        y = labelBelowIconRect.y;
+      else
+        y = stageY - this.tooltipLabel.get_height() - offset;
+      this.tooltipLabel.remove_all_transitions();
+      this.tooltipLabel.set_position(x, y);
+      this.tooltipLabel.ease({
+        opacity: 255,
+        duration: 250,
+        mode: Clutter.AnimationMode.EASE_OUT_QUAD
+      });
+    }
+    hideLabel() {
+      this.tooltipLabel.ease({
+        opacity: 0,
+        duration: 100,
+        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        onComplete: () => this.tooltipLabel.hide()
+      });
+    }
+    _onDestroy() {
+      this.tooltipLabel.remove_all_transitions();
+      this.tooltipLabel.hide();
+      global.stage.remove_child(this.tooltipLabel);
+      this.tooltipLabel.destroy();
+    }
+  }
+);
+
+var IPFinderMenuButton = GObject.registerClass(
+  class IPFinderMenuButton extends PanelMenu.Button {
+    _init(extension) {
+      super._init(0.5, _('IP Details'));
+      this.menu.box.style = 'padding: 16px;';
+
+      // Default IP data.
+      this._defaultIpData = {
+        ip: { name: _('IP Address'), text: _('Loading IP Details') },
+        hostname: { name: _('Hostname'), text: '' },
+        org: { name: _('Organization'), text: '' },
+        city: { name: _('City'), text: '' },
+        region: { name: _('Region'), text: '' },
+        country: { name: _('Country'), text: '' },
+        loc: { name: _('Location'), text: '' },
+        postal: { name: _('Postal'), text: '' },
+        timezone: { name: _('Timezone'), text: '' }
+      };
+
+      this._extension = extension;
+      this._settings = extension.getSettings();
+      this._createSettingsConnections();
+      this._textureCache = St.TextureCache.get_default();
+
+      const SESSION_TYPE = GLib.getenv('XDG_SESSION_TYPE');
+      const PACKAGE_VERSION = Config.PACKAGE_VERSION;
+      const USER_AGENT = `Mozilla/5.0 (${SESSION_TYPE}; GNOME Shell/${PACKAGE_VERSION}; Linux ${GLib.getenv('CPU')};) IP_Finder/${this._extension.metadata.version}`;
+      this._session = new Soup.Session({ user_agent: USER_AGENT, timeout: 60 });
+      this._defaultMapTile = `${this._extension.path}/icons/default_map.png`;
+      this._latestMapTile = `${this._extension.path}/icons/latest_map.png`;
+
+      // Build panel UI.
+      const panelBox = new St.BoxLayout({
+        x_align: Clutter.ActorAlign.FILL,
+        y_align: Clutter.ActorAlign.FILL,
+        style_class: 'panel-status-menu-box'
+      });
+      this.add_child(panelBox);
+
+      this._vpnStatusIcon = new St.Icon({
+        icon_name: 'changes-prevent-symbolic',
+        x_align: Clutter.ActorAlign.START,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: 'system-status-icon'
+      });
+      panelBox.add_child(this._vpnStatusIcon);
+
+      this._ipAddress = this._defaultIpData.ip.text;
+      this._ipAddressLabel = new St.Label({
+        text: this._ipAddress,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: 'system-status-icon'
+      });
+      panelBox.add_child(this._ipAddressLabel);
+
+      this._statusIcon = new St.Icon({
+        icon_name: 'network-wired-acquiring-symbolic',
+        x_align: Clutter.ActorAlign.START,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: 'system-status-icon'
+      });
+      panelBox.add_child(this._statusIcon);
+
+      this._flagIcon = new St.Label({
+        x_align: Clutter.ActorAlign.START,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: 'system-status-icon',
+        visible: false
+      });
+      panelBox.add_child(this._flagIcon);
+
+      // Build the menu section.
+      const menuSection = new PopupMenu.PopupMenuSection();
+      this.menu.addMenuItem(menuSection);
+
+      const mapAndIpDetailsBox = new St.BoxLayout({
+        x_align: Clutter.ActorAlign.FILL,
+        x_expand: true,
+        style: 'min-width:540px; padding-bottom: 10px;'
+      });
+      menuSection.actor.add_child(mapAndIpDetailsBox);
+
+      this._mapTileBox = new St.BoxLayout({
+        vertical: true,
+        x_align: Clutter.ActorAlign.CENTER,
+        y_align: Clutter.ActorAlign.CENTER,
+        y_expand: true
+      });
+      mapAndIpDetailsBox.add_child(this._mapTileBox);
+      this._mapTileBox.add_child(this._getMapTileIcon(this._defaultMapTile));
+
+      const ipInfoParentBox = new St.BoxLayout({
+        style_class: 'ip-info-box',
+        vertical: true,
+        x_align: Clutter.ActorAlign.CENTER
+      });
+      mapAndIpDetailsBox.add_child(ipInfoParentBox);
+
+      this._vpnInfoBox = new VpnInfoBox();
+      ipInfoParentBox.add_child(this._vpnInfoBox);
+
+      this._ipInfoBox = new St.BoxLayout({ vertical: true });
+      ipInfoParentBox.add_child(this._ipInfoBox);
+
+      const buttonBox = new St.BoxLayout();
+      menuSection.actor.add_child(buttonBox);
+
+      const settingsButton = new BaseButton(_('Settings'), { icon_name: 'emblem-system-symbolic' });
+      settingsButton.connect('clicked', () => {
+        extension.openPreferences();
+        this.menu.toggle();
+      });
+      buttonBox.add_child(settingsButton);
+
+      const copyButton = new BaseButton(_('Copy IP'), { icon_name: 'edit-copy-symbolic', x_expand: true, x_align: Clutter.ActorAlign.CENTER });
+      copyButton.connect('clicked', () => {
+        this._setClipboardText(this._ipAddress);
+      });
+      buttonBox.add_child(copyButton);
+
+      const refreshButton = new BaseButton(_('Refresh'), { icon_name: 'view-refresh-symbolic', x_expand: false, x_align: Clutter.ActorAlign.END });
+      refreshButton.connect('clicked', () => this._startGetIpInfo());
+      buttonBox.add_child(refreshButton);
+
+      NM.Client.new_async(null, this.establishNetworkConnectivity.bind(this));
+
+      Main.panel.addToStatusArea('ip-menu', this, 1, this._settings.get_string('position-in-panel'));
+      this._updatePanelWidgets();
+      this._updateVPNWidgets();
     }
 
-    _buildUI() {
-        // Build main panel button content
-        this.box = new St.BoxLayout({ style_class: 'panel-status-menu-box' });
-        
-        this.icon = new St.Icon({
-            gicon: Gio.icon_new_for_string(`${Me.path}/icons/globe-symbolic.svg`),
-            style_class: 'system-status-icon'
-        });
-        
-        this.label = new St.Label({ 
-            text: _("Initializing..."),
-            style_class: 'system-status-label'
-        });
-
-        this.box.add_child(this.icon);
-        this.box.add_child(this.label);
-        this.add_child(this.box);
-
-        // Build the dropdown menu
-        this.menu.removeAll();
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        this._vpnStatusItem = new PopupMenu.PopupMenuItem(_("VPN Status: Checking..."));
-        this.menu.addMenuItem(this._vpnStatusItem);
-
-        this._customIPItem = new PopupMenu.PopupMenuItem(_("Lookup Custom IP"));
-        this.menu.addMenuItem(this._customIPItem);
-
-        this._refreshItem = new PopupMenu.PopupMenuItem(_("Refresh"));
-        this.menu.addMenuItem(this._refreshItem);
-
-        this._mapTile = new St.Icon({
-            gicon: Gio.icon_new_for_string(DEFAULT_MAP),
-            icon_size: 200
-        });
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this.menu.addMenuItem(this._mapTile);
+    _setClipboardText(text) {
+      const clipboard = St.Clipboard.get_default();
+      clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
     }
 
-    async _refreshData(ip = '') {
+    _createSettingsConnections() {
+      this._settings.connectObject('changed::vpn-status', () => this._updateVPNWidgets(), this);
+      this._settings.connectObject('changed::vpn-widgets', () => this._updateVPNWidgets(), this);
+      this._settings.connectObject('changed::vpn-status-only-when-on', () => this._updateVPNWidgets(), this);
+      this._settings.connectObject('changed::vpn-icon-color', () => this._updateVPNWidgets(), this);
+      this._settings.connectObject('changed::vpn-ip-address-color', () => this._updateVPNWidgets(), this);
+      this._settings.connectObject('changed::position-in-panel', () => this._updatePosition(), this);
+      this._settings.connectObject('changed::actors-in-panel', () => this._updatePanelWidgets(), this);
+      this._settings.connectObject('changed::vpn-connections-whitelist', () => this._startGetIpInfo(), this);
+      this._settings.connectObject('changed::api-service', () => this._startGetIpInfo(), this);
+      this._settings.connectObject('changed::tile-zoom', () => this._startGetIpInfo(), this);
+      this._settings.connectObject('changed::vpn-connection-types', () => this._startGetIpInfo(), this);
+    }
+
+    _updatePosition() {
+      Main.panel.statusArea['ip-menu'] = null;
+      Main.panel.addToStatusArea('ip-menu', this, 1, this._settings.get_string('position-in-panel'));
+    }
+
+    _updatePanelWidgets() {
+      const panelActors = this._settings.get_enum('actors-in-panel');
+      if (panelActors === PanelActors.FLAG_IP) {
+        this._flagIcon.show();
+        this._ipAddressLabel.show();
+      } else if (panelActors === PanelActors.FLAG) {
+        this._flagIcon.show();
+        this._ipAddressLabel.hide();
+      } else if (panelActors === PanelActors.IP) {
+        this._flagIcon.hide();
+        this._ipAddressLabel.show();
+      }
+      this._setPanelWidgetsPadding();
+    }
+
+    _updateVPNWidgets() {
+      const showWhenActiveVpn = this._settings.get_boolean('vpn-status-only-when-on') ? this._vpnConnectionOn : true;
+      const showVpnStatus = this._settings.get_boolean('vpn-status') && showWhenActiveVpn;
+      const vpnWidgets = this._settings.get_enum('vpn-widgets');
+      this._vpnStatusIcon.visible = showVpnStatus && vpnWidgets !== VpnWidgets.TEXT_ONLY;
+      this._vpnInfoBox.visible = showVpnStatus && vpnWidgets !== VpnWidgets.ICON_ONLY;
+      this._vpnStatusIcon.icon_name = this._vpnConnectionOn ? 'changes-prevent-symbolic' : 'changes-allow-symbolic';
+      if (this._settings.get_boolean('vpn-icon-color'))
+        this._vpnStatusIcon.style_class = this._vpnConnectionOn ? 'system-status-icon ip-info-vpn-on' : 'system-status-icon ip-info-vpn-off';
+      else
+        this._vpnStatusIcon.style_class = 'system-status-icon';
+      if (this._settings.get_boolean('vpn-ip-address-color'))
+        this._ipAddressLabel.style_class = this._vpnConnectionOn ? 'system-status-icon ip-info-vpn-on' : 'system-status-icon ip-info-vpn-off';
+      else
+        this._ipAddressLabel.style_class = 'system-status-icon';
+      this._setPanelWidgetsPadding();
+    }
+
+    _setPanelWidgetsPadding() {
+      const iconShown = this._flagIcon.visible || this._statusIcon.visible;
+      const ipLabelShown = this._ipAddressLabel.visible;
+      const vpnIconShown = this._vpnStatusIcon.visible;
+      let style = '';
+      if (iconShown && ipLabelShown && vpnIconShown)
+        style = 'padding-left: 0px; padding-right: 0px;';
+      else if (iconShown && ipLabelShown && !vpnIconShown)
+        style = 'padding-right: 0px;';
+      else if (!iconShown && ipLabelShown && vpnIconShown)
+        style = 'padding-left: 0px;';
+      else if (!iconShown && ipLabelShown && !vpnIconShown)
+        style = '';
+      this._ipAddressLabel.style = style;
+    }
+
+    establishNetworkConnectivity(obj, result) {
+      this._client = NM.Client.new_finish(result);
+      this._connectivityQueue = new Set();
+      this._mainConnection = null;
+      this._client.connectObject(
+        'notify::primary-connection', () => this._syncMainConnection(),
+        'notify::activating-connection', () => this._syncMainConnection(),
+        'notify::active-connections', () => this._syncMainConnection(),
+        'notify::connectivity', () => this._syncConnectivity(),
+        this
+      );
+      this._syncMainConnection();
+    }
+
+    _syncMainConnection() {
+      this._setAcquiringDetails();
+      if (this._mainConnection) {
+        this._mainConnection.disconnectObject(this);
+      }
+      this._mainConnection = this._client.get_primary_connection() || this._client.get_activating_connection();
+      if (this._mainConnection) {
+        this._mainConnection.connectObject('notify::state', this._mainConnectionStateChanged.bind(this), this);
+        this._mainConnectionStateChanged();
+      }
+      this._syncConnectivity();
+    }
+
+    _mainConnectionStateChanged() {
+      if (this._mainConnection.state === NM.ActiveConnectionState.ACTIVATED)
+        this._startGetIpInfo();
+    }
+
+    _startGetIpInfo() {
+      this._session.abort();
+      this._removeGetIpInfoId();
+      this._setAcquiringDetails();
+      this._getIpInfoId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+        this._getIpInfo().catch(err => debugLog(err));
+        this._getIpInfoId = null;
+        return GLib.SOURCE_REMOVE;
+      });
+    }
+
+    _removeGetIpInfoId() {
+      if (this._getIpInfoId) {
+        GLib.source_remove(this._getIpInfoId);
+        this._getIpInfoId = null;
+      }
+    }
+
+    _flushConnectivityQueue() {
+      for (const item of this._connectivityQueue)
+        this._portalHelperProxy?.CloseAsync(item);
+      this._connectivityQueue.clear();
+    }
+
+    _closeConnectivityCheck(path) {
+      if (this._connectivityQueue.delete(path))
+        this._portalHelperProxy?.CloseAsync(path);
+    }
+
+    async _portalHelperDone(proxy, emitter, parameters) {
+      const args = parameters.deep_unpack ? parameters.deep_unpack() : parameters;
+      const [path, result] = args;
+      if (result === PortalHelperResult.CANCELLED) {
+        this._setIpDetails();
+      } else if (result === PortalHelperResult.COMPLETED) {
+        this._startGetIpInfo();
+        this._closeConnectivityCheck(path);
+      } else if (result === PortalHelperResult.RECHECK) {
+        this._setIpDetails();
         try {
-            this.label.text = _("Fetching...");
-            const data = await this._fetchIPData(ip);
-            this._updateDisplay(data);
-            this._checkVPNStatus(data);
-            this._updateMapTile(data);
-        } catch (error) {
-            this._showError(error.message);
-        }
-    }
-
-    async _fetchIPData(ip) {
-        // Choose API service based on extension settings
-        const apiService = settings.get_enum('api-service');
-        let apiUrl;
-        
-        switch(apiService) {
-            case API_SERVICES.IPINFO_IO:
-                apiUrl = `https://ipinfo.io/${ip || ''}/json`;
-                break;
-            case API_SERVICES.CUSTOM:
-                apiUrl = settings.get_string('custom-api-url').replace('%s', ip || '');
-                break;
-            default:
-                apiUrl = `https://ipapi.co/${ip || ''}/json/`;
-        }
-
-        let message = Soup.Message.new('GET', apiUrl);
-        let response = await new Promise((resolve, reject) => {
-            SESSION.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null, (session, result) => {
-                try {
-                    let res = SESSION.send_and_read_finish(result);
-                    resolve(res);
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        });
-
-        if (message.status_code !== 200) {
-            throw new Error(_("API request failed"));
-        }
-
-        // Parse response data (using imports.byteArray for conversion)
-        return JSON.parse(imports.byteArray.toString(response));
-    }
-
-    _updateDisplay(data) {
-        this.label.text = `${data.ip} (${data.country_code || data.country})`;
-        
-        // Remove previously added info items (if any) from the menu
-        this.menu._getMenuItems().forEach(item => {
-            if (item._isInfoItem === true) {
-                item.destroy();
-            }
-        });
-
-        let addInfo = (label, value) => {
-            let item = new PopupMenu.PopupMenuItem(`<b>${label}:</b> ${value}`, { reactive: false });
-            item.label.clutter_text.use_markup = true;
-            item._isInfoItem = true;
-            this.menu.addMenuItem(item, 1);
-        };
-
-        if (data.org) addInfo(_("ISP"), data.org);
-        if (data.city) addInfo(_("City"), data.city);
-        if (data.region) addInfo(_("Region"), data.region);
-        if (data.latitude && data.longitude) {
-            addInfo(_("Coordinates"), `${data.latitude}, ${data.longitude}`);
-        }
-    }
-
-    _checkVPNStatus(data) {
-        const connectionTypes = settings.get_strv('vpn-connection-types');
-        let isVPN = connectionTypes.some(type => 
-            data.security?.includes(type) || data.network?.includes(type)
-        );
-        this._vpnStatusItem.label.text = _("VPN Status:") + ` ${isVPN ? '🔒 Connected' : '⚠️ Unprotected'}`;
-        this._vpnStatusItem.setStyleClass(isVPN ? 'success' : 'warning');
-    }
-
-    _updateMapTile(data) {
-        if (data.latitude && data.longitude) {
-            const zoom = settings.get_int('tile-zoom');
-            const mapUrl = `https://tile.openstreetmap.org/${zoom}/${data.latitude}/${data.longitude}.png`;
-            this._mapTile.gicon = Gio.icon_new_for_string(mapUrl);
-        }
-    }
-
-    _setupNetworkMonitoring() {
-        try {
-            this._client = new NM.Client();
-            this._client.connect('notify::primary-connection', () => this._refreshData());
-            this._client.connect('notify::connectivity', () => this._refreshData());
+          const state = await this._client.check_connectivity_async(null);
+          if (state >= NM.ConnectivityState.FULL) {
+            this._startGetIpInfo();
+            this._closeConnectivityCheck(path);
+          }
         } catch (e) {
-            debugLog("Network Manager not available");
+          debugLog(e);
         }
+      } else {
+        this._setIpDetails(null, `Invalid result from portal helper: ${result}`);
+      }
     }
 
-    _setupAutoRefresh() {
-        // Auto-refresh every 5 minutes (300 seconds)
-        this._refreshTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 300, () => {
-            this._refreshData();
-            return true; // Continue the timeout
+    async _syncConnectivity() {
+      if (this._client.get_active_connections().length < 1 || this._client.connectivity === NM.ConnectivityState.NONE) {
+        this._setIpDetails();
+      }
+      if (!this._mainConnection || this._mainConnection.state !== NM.ActiveConnectionState.ACTIVATED) {
+        this._setIpDetails();
+        this._flushConnectivityQueue();
+        return;
+      }
+      let isPortal = this._client.connectivity === NM.ConnectivityState.PORTAL;
+      if (GLib.getenv('GNOME_SHELL_CONNECTIVITY_TEST') != null)
+        isPortal ||= this._client.connectivity < NM.ConnectivityState.FULL;
+      if (!isPortal)
+        return;
+      const path = this._mainConnection.get_path();
+      if (this._connectivityQueue.has(path)) return;
+      const timestamp = global.get_current_time();
+      if (!this._portalHelperProxy) {
+        this._portalHelperProxy = new Gio.DBusProxy({
+          g_connection: Gio.DBus.session,
+          g_name: 'org.gnome.Shell.PortalHelper',
+          g_object_path: '/org/gnome/Shell/PortalHelper',
+          g_interface_name: PortalHelperInfo.name,
+          g_interface_info: PortalHelperInfo,
         });
+        this._portalHelperProxy.connectSignal(
+          'Done',
+          (proxy, sender, parameters) =>
+            this._portalHelperDone(proxy, sender, parameters).catch(console.error)
+        );
+        try {
+          await this._portalHelperProxy.init_async(GLib.PRIORITY_DEFAULT, null);
+        } catch (e) {
+          debugLog(`Error launching the portal helper: ${e.message}`);
+        }
+      }
+      this._portalHelperProxy?.AuthenticateAsync(path, this._client.connectivity_check_uri, timestamp)
+        .catch(console.error);
+      this._connectivityQueue.add(path);
     }
 
-    _setupListeners() {
-        this._refreshItem.connect('activate', () => this._refreshData());
-        this._customIPItem.connect('activate', () => {
-            const dialog = new ModalDialog.TextEntry(_("Enter IP Address"));
-            dialog.open(response => {
-                if (response && this._validateIP(response)) {
-                    this._refreshData(response);
-                }
-            });
+    async _getIpInfo() {
+      this._setAcquiringDetails();
+      this._vpnConnectionOn = false;
+      this._vpnConnectionName = null;
+      if (this._client.connectivity === NM.ConnectivityState.NONE) {
+        this._setIpDetails();
+        return;
+      }
+      const whiteList = this._settings.get_strv('vpn-connections-whitelist');
+      const activeConnectionIds = [];
+      const activeConnections = this._client.get_active_connections() || [];
+      const handledTypes = this._settings.get_strv('vpn-connection-types');
+
+      debugLog('IP-Finder Log: Active Connections --------------------------');
+      activeConnections.forEach(a => {
+        activeConnectionIds.push(a.id);
+        if (a.state === NM.ActiveConnectionState.ACTIVATED &&
+            (handledTypes.includes(a.type) || whiteList.includes(a.id))) {
+          debugLog(`VPN Connection: '${a.id}', Type: '${a.type}'`);
+          this._vpnConnectionOn = true;
+          this._vpnConnectionName = a.id;
+        } else {
+          debugLog(`Connection: '${a.id}', Type: '${a.type}'`);
+        }
+      });
+      debugLog('------------------------------------------------------------');
+      this._settings.set_strv('current-connection-ids', activeConnectionIds);
+      if (activeConnections.length < 1) {
+        this._setIpDetails();
+        return;
+      }
+      const apiService = this._settings.get_enum('api-service');
+      this._currentApiService = apiService;
+      if (apiService === CUSTOM_API) {
+        const customUrl = this._settings.get_string('custom-api-url');
+        if (!customUrl || customUrl.length === 0) {
+          debugLog("Custom API selected but no URL provided. Falling back to ipinfo.io");
+          this._currentApiService = ApiService.IP_INFO_IO;
+        } else {
+          try {
+            const uri = Soup.URI.new_from_string(customUrl);
+            const message = new Soup.Message({ method: 'GET', uri: uri });
+            message.request_headers.append('Accept', 'application/json');
+            message.request_headers.append('User-Agent', 'GNOME-IP-Finder/1.0');
+            const response = await this._session.send_and_read_async(message, null);
+            const dataStr = new TextDecoder().decode(response.get_data());
+            let data = JSON.parse(dataStr);
+            debugLog("Custom API returned: " + JSON.stringify(data));
+            this._setIpDetails(data);
+          } catch (error) {
+            debugLog("Custom API error: " + error.message);
+            this._setIpDetails(null, error.message);
+          }
+          return;
+        }
+      }
+      const { data, error } = await Utils.getIPDetails(this._session, {}, this._currentApiService);
+      debugLog(`Received API response: ${JSON.stringify(data)}`);
+      this._setIpDetails(data, error);
+    }
+
+    _setAcquiringDetails() {
+      this._flagIcon.hide();
+      this._statusIcon.show();
+      this._ipAddressLabel.text = _(this._defaultIpData.ip.text);
+      this._ipAddressLabel.style_class = 'system-status-icon';
+      this._statusIcon.icon_name = 'network-wired-acquiring-symbolic';
+      this._vpnStatusIcon.style_class = 'system-status-icon';
+      this._vpnStatusIcon.hide();
+      this._vpnInfoBox.hide();
+    }
+
+    _setIpDetails(data, error) {
+      // Clear previous children
+      this._ipInfoBox.get_children().forEach(child => child.destroy());
+      this._mapTileBox.get_children().forEach(child => child.destroy());
+      if (!data) {
+        this._ipAddressLabel.style_class = 'system-status-icon';
+        this._ipAddressLabel.text = error ? _('Error!') : _('No Connection');
+        this._statusIcon.show();
+        this._statusIcon.icon_name = 'network-offline-symbolic';
+        this._vpnStatusIcon.style_class = 'system-status-icon';
+        const ipInfoRow = new St.BoxLayout();
+        this._ipInfoBox.add_child(ipInfoRow);
+        const label = new St.Label({
+          style_class: 'ip-info-key',
+          text: error ? `${error}` : _('No Connection'),
+          x_align: Clutter.ActorAlign.CENTER,
+          x_expand: true
         });
-    }
+        ipInfoRow.add_child(label);
+        this._mapTileBox.add_child(this._getMapTileIcon(this._defaultMapTile));
+        return;
+      }
+      this._statusIcon.hide();
+      if (!data['loc'] && data['lat'] && data['lon']) {
+        data['loc'] = `${data['lat']}, ${data['lon']}`;
+      }
+      this._ipAddress = data.ip || data.query || _('Unavailable');
+      this._ipAddressLabel.text = this._ipAddress;
+      const panelActors = this._settings.get_enum('actors-in-panel');
+      if (panelActors === PanelActors.FLAG_IP || panelActors === PanelActors.FLAG)
+        this._flagIcon.show();
+      this._flagIcon.text = getFlagEmoji(data.countryCode || data.country);
+      this._vpnInfoBox.setVpnStatus({
+        vpnOn: this._vpnConnectionOn,
+        iconPath: this._vpnConnectionOn ? 'changes-prevent-symbolic' : 'changes-allow-symbolic',
+        vpnName: this._vpnConnectionName ? this._vpnConnectionName : _('On'),
+        styleClass: this._vpnConnectionOn ? 'ip-info-vpn-on' : 'ip-info-vpn-off'
+      });
+      this._updatePanelWidgets();
+      this._updateVPNWidgets();
 
-    _validateIP(ip) {
-        const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$|^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/;
-        return ipPattern.test(ip);
-    }
+      debugLog(`Received IP Data: ${JSON.stringify(data)}`);
 
-    _showError(message) {
-        this.label.text = _("Error");
-        let errorItem = new PopupMenu.PopupMenuItem(`<b>${_("Error:")}</b> ${message}`, { reactive: false });
-        errorItem.label.clutter_text.use_markup = true;
-        this.menu.addMenuItem(errorItem, 1);
-    }
-
-    destroy() {
-        if (this._refreshTimeout) {
-            GLib.Source.remove(this._refreshTimeout);
-            this._refreshTimeout = null;
+      let displayKeys;
+      if (this._currentApiService === ApiService.IP_INFO_IO) {
+        displayKeys = [
+          { key: 'ip', label: _('IP Address') },
+          { key: 'hostname', label: _('Hostname') },
+          { key: 'org', label: _('Organization') },
+          { key: 'city', label: _('City') },
+          { key: 'region', label: _('Region') },
+          { key: 'country', label: _('Country') },
+          { key: 'loc', label: _('Location') },
+          { key: 'postal', label: _('Postal') },
+          { key: 'timezone', label: _('Timezone') }
+        ];
+      } else {
+        displayKeys = [
+          { key: 'query', label: _('IP Address') },
+          { key: 'country', label: _('Country') },
+          { key: 'regionName', label: _('Region') },
+          { key: 'city', label: _('City') },
+          { key: 'zip', label: _('Postal') },
+          { key: 'lat', label: _('Latitude') },
+          { key: 'lon', label: _('Longitude') },
+          { key: 'timezone', label: _('Timezone') },
+          { key: 'isp', label: _('ISP') },
+          { key: 'org', label: _('Organization') },
+          { key: 'as', label: _('AS') }
+        ];
+      }
+      displayKeys.forEach(item => {
+        if (data[item.key]) {
+          const row = new St.BoxLayout();
+          this._ipInfoBox.add_child(row);
+          const label = new St.Label({
+            style_class: 'ip-info-key',
+            text: `${item.label}: `,
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.CENTER
+          });
+          row.add_child(label);
+          const valueLabel = new St.Label({
+            style_class: 'ip-info-value',
+            text: data[item.key].toString(),
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true
+          });
+          const btn = new St.Button({ child: valueLabel });
+          btn.connect('button-press-event', () => {
+            this._setClipboardText(valueLabel.text);
+          });
+          row.add_child(btn);
         }
-        super.destroy();
+      });
+      if (data.privacy) {
+        const vpnRow = new St.BoxLayout();
+        this._ipInfoBox.add_child(vpnRow);
+        const privacyLabel = new St.Label({
+          style_class: 'ip-info-key',
+          text: _('Proxy/VPN: '),
+          x_align: Clutter.ActorAlign.FILL,
+          y_align: Clutter.ActorAlign.CENTER
+        });
+        vpnRow.add_child(privacyLabel);
+        const vpnInfoText = [];
+        vpnInfoText.push(`${_('VPN')}: ${data.privacy.vpn ? _('Yes') : _('No')}`);
+        vpnInfoText.push(`${_('Proxy')}: ${data.privacy.proxy ? _('Yes') : _('No')}`);
+        vpnInfoText.push(`${_('Tor')}: ${data.privacy.tor ? _('Yes') : _('No')}`);
+        vpnInfoText.push(`${_('Hosting')}: ${data.privacy.hosting ? _('Yes') : _('No')}`);
+        const privacyValueLabel = new St.Label({
+          style_class: 'ip-info-value',
+          text: vpnInfoText.join(' | '),
+          x_align: Clutter.ActorAlign.FILL,
+          y_align: Clutter.ActorAlign.CENTER,
+          x_expand: true
+        });
+        const privacyBtn = new St.Button({ child: privacyValueLabel });
+        privacyBtn.connect('button-press-event', () => {
+          this._setClipboardText(privacyValueLabel.text);
+        });
+        vpnRow.add_child(privacyBtn);
+      }
+      this._ipInfoBox.add_child(new PopupMenu.PopupSeparatorMenuItem());
+      const location = data['loc'];
+      this._setMapTile(location).catch(e => debugLog(e));
     }
-});
 
-/* ***************************************
-   Fallback Implementation for GNOME <45
-   using Lang.Class
-***************************************** */
-var IPFinderIndicator = new Lang.Class({
-    Name: 'IPFinderIndicator',
-    Extends: PanelMenu.Button,
-
-    _init: function() {
-        this.parent(0.0, "IP Finder Widget");
-        this._ipAddress = "Fetching...";
-        this._geoData = {};
-
-        this._label = new St.Label({ text: this._ipAddress });
-        this.actor.add_child(this._label);
-
-        this._refreshItem = new PopupMenu.PopupMenuItem("Refresh IP");
-        this._refreshItem.connect('activate', Lang.bind(this, this._updateIP));
-        this.menu.addMenuItem(this._refreshItem);
-
-        this._separator = new PopupMenu.PopupSeparatorMenuItem();
-        this.menu.addMenuItem(this._separator);
-
-        this._geoItem = new PopupMenu.PopupMenuItem("Location: ...");
-        this.menu.addMenuItem(this._geoItem);
-
-        this._updateIP();
-        this._setupAutoRefresh();
-    },
-
-    _setupAutoRefresh: function() {
-        this._timeout = Mainloop.timeout_add_seconds(300, Lang.bind(this, function() {
-            this._updateIP();
-            return true;
-        }));
-    },
-
-    _updateIP: function() {
-        var url = "https://ipinfo.io/json";
-        var message = Soup.Message.new('GET', url);
-
-        var http_session = new Soup.Session();
-        http_session.user_agent = 'GnomeShellIPFinder/1.0 (+https://github.com/krinosec/IP-FinderWidget)';
-
-        http_session.queue_message(message, Lang.bind(this, function(session, response) {
-            try {
-                if (message.status_code !== 200) {
-                    this._ipAddress = "API Error";
-                    this._label.set_text(this._ipAddress);
-                    return;
-                }
-
-                var data = JSON.parse(message.response_body.data);
-                this._ipAddress = data.ip || "No IP";
-                this._geoData = {
-                    city: data.city,
-                    region: data.region,
-                    country: data.country
-                };
-
-                this._label.set_text(this._ipAddress);
-                this._geoItem.label.text = "Location: " + [
-                    this._geoData.city,
-                    this._geoData.region,
-                    this._geoData.country
-                ].filter(Boolean).join(", ");
-            } catch(e) {
-                logError(e, 'IP-FinderWidget Error');
-                this._label.set_text("Parse Error");
-            }
-        }));
-    },
-
-    destroy: function() {
-        if (this._timeout) {
-            Mainloop.source_remove(this._timeout);
-            this._timeout = null;
+    async _setMapTile(location) {
+      const zoom = this._settings.get_int('tile-zoom');
+      const mapTileInfo = Utils.getMapTileInfo(location, zoom);
+      const mapTileCoordinates = `${mapTileInfo.xTile},${mapTileInfo.yTile}`;
+      const mapTileUrl = `${mapTileInfo.zoom}/${mapTileInfo.xTile}/${mapTileInfo.yTile}`;
+      if (mapTileCoordinates !== this._settings.get_string('map-tile-coords') ||
+          !this._checkLatestFileMapExists()) {
+        this._mapTileBox.add_child(this._getMapTileIcon(this._defaultMapTile));
+        const mapLabel = new St.Label({
+          style_class: 'ip-info-key',
+          text: _('Loading new map tile...'),
+          x_align: Clutter.ActorAlign.CENTER
+        });
+        this._mapTileBox.add_child(mapLabel);
+        const { file, error } = await Utils.getMapTile(this._session, this._extension.soupParams, this._extension.path, mapTileUrl);
+        if (error) {
+          mapLabel.text = _(`Error getting map tile: ${error}`);
+        } else {
+          this._settings.set_string('map-tile-coords', mapTileCoordinates);
+          this._mapTileBox.get_children().forEach(child => child.destroy());
+          this._mapTileBox.add_child(this._textureCache.load_file_async(file, -1, 200, 1, 1));
         }
-        this.parent();
+        return;
+      }
+      this._mapTileBox.add_child(this._getMapTileIcon(this._latestMapTile));
     }
-});
 
-// Create the correct widget instance based on GNOME version
-function createWidgetInstance() {
-    let majorVersion = parseInt(Config.PACKAGE_VERSION.split('.')[0]);
-    if (majorVersion >= 45) {
-        return new IPFinderWidget();
-    } else {
-        return new IPFinderIndicator();
+    _getMapTileIcon(mapTile) {
+      if (mapTile === this._defaultMapTile)
+        return new St.Icon({ gicon: Gio.icon_new_for_string(mapTile), icon_size: 200 });
+      else
+        return this._textureCache.load_file_async(Gio.File.new_for_path(this._latestMapTile), -1, 200, 1, 1);
     }
-}
 
-/* ***************************************
-   Extension Entry Points
-***************************************** */
-function init() {
-    ExtensionUtils.initTranslations();
-    settings = ExtensionUtils.getSettings();
-}
-
-function enable() {
-    if (!ipFinderInstance) {
-        ipFinderInstance = createWidgetInstance();
-        Main.panel.addToStatusArea('ip-finder-widget', ipFinderInstance);
+    _checkLatestFileMapExists() {
+      const file = Gio.File.new_for_path(this._latestMapTile);
+      return file.query_exists(null);
     }
-}
 
-function disable() {
-    if (ipFinderInstance) {
-        ipFinderInstance.destroy();
-        ipFinderInstance = null;
+    disable() {
+      this._removeGetIpInfoId();
+      this._client?.disconnectObject(this);
+      this._settings.disconnectObject(this);
+      this._settings = null;
     }
+  }
+);
+
+export default class IpFinder extends Extension {
+  enable() {
+    this.soupParams = { id: `ip-finder/v${this.metadata.version}` };
+    this._menuButton = new IPFinderMenuButton(this);
+  }
+  disable() {
+    this.soupParams = null;
+    if (this._menuButton) {
+      this._menuButton.disable();
+      this._menuButton.destroy();
+      this._menuButton = null;
+    }
+  }
 }
